@@ -37,6 +37,17 @@ union Token {
 };
 
 
+RedisModuleKey *RedisSessions_GetStoredSignature(RedisModuleCtx *ctx, const char* sessionId) {
+  RedisModuleString *sessionSignatureKeyStr = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", sessionId);
+  RedisModuleKey *redisKey = RedisModule_OpenKey(ctx, sessionSignatureKeyStr, REDISMODULE_READ | REDISMODULE_WRITE);
+  
+  if (RedisModule_KeyType(redisKey) != REDISMODULE_KEYTYPE_STRING) {
+    return NULL;
+  }
+  
+  return redisKey;
+}
+
 
 
 void generatePseudoRandomString(char *generatedStr) {
@@ -59,14 +70,11 @@ void signData(const char *key, const size_t keyLen, const char *data, const size
 void parseToken(const char *token, char *tokenVersion, char *sessionId, char *signature) {
   uint8_t i = 0;
   uint8_t ti = 0;
-  for (i = 0; i < TOKEN_VERSION_STRLEN; i++, ti++)
-    tokenVersion[i] = token[ti];
+  for (i = 0; i < TOKEN_VERSION_STRLEN; i++, ti++) tokenVersion[i] = token[ti];
   ti++;
-  for (i = 0; i < SESSION_ID_STRLEN; i++, ti++)
-    sessionId[i] = token[ti];
+  for (i = 0; i < SESSION_ID_STRLEN; i++, ti++) sessionId[i] = token[ti];
   ti++;
-  for (i = 0; i < SIGNATURE_STRLEN; i++, ti++)
-    signature[i] = token[ti];
+  for (i = 0; i < SIGNATURE_STRLEN; i++, ti++) signature[i] = token[ti];
 }
 
 
@@ -100,24 +108,18 @@ int EndCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   // Recreate the signature of the session id and compare with the signature
   // contained in the token.
   char signatureCheck[SIGNATURE_STRLEN + 1];
-  signData(signKey, signKeyLen,
-           sessionId, SESSION_ID_STRLEN, signatureCheck);
+  signData(signKey, signKeyLen, sessionId, SESSION_ID_STRLEN, signatureCheck);
   if (strncmp(signature, signatureCheck, SIGNATURE_STRLEN) != 0)
     return RedisModule_ReplyWithError(ctx, "the signature contained in <token> is invalid");
 
   // Check if the signature is the same stored in the session.
-  RedisModuleString *sessionSignatureKeyStr =
-      RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", sessionId);
-  RedisModuleKey *redisKey = RedisModule_OpenKey(
-      ctx, sessionSignatureKeyStr, REDISMODULE_READ | REDISMODULE_WRITE);
-  if (RedisModule_KeyType(redisKey) != REDISMODULE_KEYTYPE_STRING) {
-    return RedisModule_ReplyWithError(ctx, "the session id contained in <token> does not exist");
-  }
+  RedisModuleKey *redisKey = RedisSessions_GetStoredSignature(ctx, sessionId);
+  if (!redisKey) return RedisModule_ReplyWithError(ctx, "the session id contained in <token> does not exist");
+  
   size_t signatureStoredLen;
   char *signatureStored = RedisModule_StringDMA(redisKey, &signatureStoredLen, REDISMODULE_READ);
   if (strncmp(signature, signatureStored, SIGNATURE_STRLEN) != 0) {
-    return RedisModule_ReplyWithError(
-        ctx, "the signature contained in <token> seems to be valid, but is "
+    return RedisModule_ReplyWithError(ctx, "the signature contained in <token> seems to be valid, but is "
              "different from the stored signature in the session");
   }
 
@@ -172,17 +174,12 @@ int ExpireCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   char signatureCheck[SIGNATURE_STRLEN + 1];
   signData(signKey, signKeyLen, sessionId, SESSION_ID_STRLEN, signatureCheck);
   if (strncmp(signature, signatureCheck, SIGNATURE_STRLEN) != 0)
-    return RedisModule_ReplyWithError(
-        ctx, "the signature contained in <token> is invalid");
+    return RedisModule_ReplyWithError(ctx, "the signature contained in <token> is invalid");
 
   // Check if the signature is the same stored in the session.
-  RedisModuleString *sessionSignatureKeyStr =
-      RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", sessionId);
-  RedisModuleKey *redisKey = RedisModule_OpenKey(
-      ctx, sessionSignatureKeyStr, REDISMODULE_READ | REDISMODULE_WRITE);
-  if (RedisModule_KeyType(redisKey) != REDISMODULE_KEYTYPE_STRING) {
-    return RedisModule_ReplyWithError(ctx, "the session id contained in <token> does not exist");
-  }
+  RedisModuleKey *redisKey = RedisSessions_GetStoredSignature(ctx, sessionId);
+  if (!redisKey) return RedisModule_ReplyWithError(ctx, "the session id contained in <token> does not exist");
+  
   size_t signatureStoredLen;
   char *signatureStored = RedisModule_StringDMA(redisKey, &signatureStoredLen, REDISMODULE_READ);
   if (strncmp(signature, signatureStored, SIGNATURE_STRLEN) != 0) {
@@ -211,8 +208,7 @@ int PDelCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   size_t signKeyLen;
   const char *signKey = RedisModule_StringPtrLen(argv[1], &signKeyLen);
   if (signKeyLen == 0)
-    return RedisModule_ReplyWithError(
-        ctx, "<sign_key> must have at least one character");
+    return RedisModule_ReplyWithError(ctx, "<sign_key> must have at least one character");
 
   // Extract <token> and validate it.
   size_t tokenLen;
@@ -236,24 +232,20 @@ int PDelCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   signData(signKey, signKeyLen,
            sessionId, SESSION_ID_STRLEN, signatureCheck);
   if (strncmp(signature, signatureCheck, SIGNATURE_STRLEN) != 0)
-    return RedisModule_ReplyWithError(
-        ctx, "the signature contained in <token> is invalid");
+    return RedisModule_ReplyWithError(ctx, "the signature contained in <token> is invalid");
 
   // Check if the signature is the same stored in the session.
   RedisModuleString *sessionSignatureKeyStr =
       RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", sessionId);
-  RedisModuleKey *redisKey = RedisModule_OpenKey(
-      ctx, sessionSignatureKeyStr, REDISMODULE_READ | REDISMODULE_WRITE);
+  RedisModuleKey *redisKey = RedisModule_OpenKey(ctx, sessionSignatureKeyStr, REDISMODULE_READ | REDISMODULE_WRITE);
   if (RedisModule_KeyType(redisKey) != REDISMODULE_KEYTYPE_STRING) {
-    return RedisModule_ReplyWithError(
-        ctx, "the session id contained in <token> does not exist");
+    return RedisModule_ReplyWithError(ctx, "the session id contained in <token> does not exist");
   }
   size_t signatureStoredLen;
   char *signatureStored =
       RedisModule_StringDMA(redisKey, &signatureStoredLen, REDISMODULE_READ);
   if (strncmp(signature, signatureStored, SIGNATURE_STRLEN) != 0) {
-    return RedisModule_ReplyWithError(
-        ctx, "the signature contained in <token> seems to be valid, but is "
+    return RedisModule_ReplyWithError(ctx, "the signature contained in <token> seems to be valid, but is "
              "different from the stored signature in the session");
   }
 
@@ -263,8 +255,7 @@ int PDelCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   size_t payloadNameLen;
   RedisModule_StringPtrLen(payloadName, &payloadNameLen);
   if (payloadNameLen == 0)
-    return RedisModule_ReplyWithError(
-        ctx, "<payload_name> must have at least one character");
+    return RedisModule_ReplyWithError(ctx, "<payload_name> must have at least one character");
   else if (payloadNameLen > PAYLOAD_NAME_MAX_STRLEN) {
     char msg[128];
     sprintf(msg,
@@ -278,8 +269,7 @@ int PDelCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
       RedisModule_CreateStringPrintf(ctx, "sg-session:%s:payloads", sessionId);
   redisKey = RedisModule_OpenKey(ctx, sessionPayloadsKeyStr, REDISMODULE_WRITE);
   if (RedisModule_KeyType(redisKey) != REDISMODULE_KEYTYPE_HASH) {
-    return RedisModule_ReplyWithError(
-        ctx, "the requested <payload_name> does not exist");
+    return RedisModule_ReplyWithError(ctx, "the requested <payload_name> does not exist");
   }
   RedisModule_HashSet(redisKey, REDISMODULE_HASH_NONE, payloadName, REDISMODULE_HASH_DELETE, NULL);
 
@@ -321,16 +311,13 @@ int PGetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     return RedisModule_ReplyWithError(ctx, "the signature contained in <token> is invalid");
 
   // Check if the signature is the same stored in the session.
-  RedisModuleString *sessionSignatureKeyStr = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", sessionId);
-  RedisModuleKey *redisKey = RedisModule_OpenKey(ctx, sessionSignatureKeyStr, REDISMODULE_READ | REDISMODULE_WRITE);
-  if (RedisModule_KeyType(redisKey) != REDISMODULE_KEYTYPE_STRING) {
-    return RedisModule_ReplyWithError(ctx, "the session id contained in <token> does not exist");
-  }
+  RedisModuleKey *redisKey = RedisSessions_GetStoredSignature(ctx, sessionId);
+  if (!redisKey) return RedisModule_ReplyWithError(ctx, "the session id contained in <token> does not exist");
+  
   size_t signatureStoredLen;
   char *signatureStored = RedisModule_StringDMA(redisKey, &signatureStoredLen, REDISMODULE_READ);
   if (strncmp(signature, signatureStored, SIGNATURE_STRLEN) != 0) {
-    return RedisModule_ReplyWithError(
-        ctx, "the signature contained in <token> seems to be valid, but is "
+    return RedisModule_ReplyWithError(ctx, "the signature contained in <token> seems to be valid, but is "
              "different from the stored signature in the session");
   }
 
@@ -392,24 +379,19 @@ int PSetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   // Recreate the signature of the session id and compare with the signature
   // contained in the token.
   char signatureCheck[SIGNATURE_STRLEN + 1];
-  signData(signKey, signKeyLen,
-           sessionId, SESSION_ID_STRLEN, signatureCheck);
+  signData(signKey, signKeyLen, sessionId, SESSION_ID_STRLEN, signatureCheck);
   if (strncmp(signature, signatureCheck, SIGNATURE_STRLEN) != 0)
     return RedisModule_ReplyWithError(ctx, "the signature contained in <token> is invalid");
 
   // Check if the signature is the same stored in the session.
-  RedisModuleString *sessionSignatureKeyStr = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", sessionId);
-  RedisModuleKey *redisKey = RedisModule_OpenKey(ctx, sessionSignatureKeyStr, REDISMODULE_READ | REDISMODULE_WRITE);
-  if (RedisModule_KeyType(redisKey) != REDISMODULE_KEYTYPE_STRING) {
-    return RedisModule_ReplyWithError(
-        ctx, "the session id contained in <token> does not exist");
-  }
+  RedisModuleKey *redisKey = RedisSessions_GetStoredSignature(ctx, sessionId);
+  if (!redisKey) return RedisModule_ReplyWithError(ctx, "the session id contained in <token> does not exist");
+  
+
   size_t signatureStoredLen;
-  char *signatureStored =
-      RedisModule_StringDMA(redisKey, &signatureStoredLen, REDISMODULE_READ);
+  char *signatureStored = RedisModule_StringDMA(redisKey, &signatureStoredLen, REDISMODULE_READ);
   if (strncmp(signature, signatureStored, SIGNATURE_STRLEN) != 0) {
-    return RedisModule_ReplyWithError(
-        ctx, "the signature contained in <token> seems to be valid, but is "
+    return RedisModule_ReplyWithError(ctx, "the signature contained in <token> seems to be valid, but is "
              "different from the stored signature in the session");
   }
 
@@ -479,9 +461,6 @@ int StartCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     return RedisModule_ReplyWithError(ctx, "<ttl> must be a valid integer that represents seconds");
   if (ttl < 0)
     return RedisModule_ReplyWithError(ctx, "<ttl> must be a valid integer that represents seconds");
-
-  //char sessionId[SESSION_ID_STRLEN + 1] = {0};
-  //char signature[SIGNATURE_STRLEN + 1];
 
   
   RedisModuleKey *redisKey;
