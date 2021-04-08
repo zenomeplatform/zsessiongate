@@ -27,7 +27,6 @@ char* ERROR_SIG_1 = "the signature contained in <token> is invalid";
 char* ERROR_SIG_2 = "the session id contained in <token> does not exist";
 char* ERROR_SIG_3 = "the signature contained in <token> seems to be valid, but is different from the stored signature in the session";
 
-
 typedef struct {
     char* tokenVersion;
     char* sessionId;
@@ -97,6 +96,42 @@ char* RedisModule_CheckSignature(RedisModuleCtx *ctx, char* signKey, ParsedToken
   return NULL;
 }
 
+void RedisModule_DeleteRecord(RedisModuleCtx *ctx, ParsedToken parsed, const char *subname) {
+    RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:%s", parsed.sessionId, subname);
+    RedisModuleKey *key = RedisModule_OpenKey(ctx, str, REDISMODULE_WRITE);
+    if (RedisModule_KeyType(key) == REDISMODULE_KEYTYPE_EMPTY) return;
+    RedisModule_DeleteKey(key);
+}
+
+void RedisModule_SetRecordTTL(RedisModuleCtx *ctx, ParsedToken parsed, const char *subname, long long ttl) {
+    RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:%s", parsed.sessionId, subname);
+    RedisModuleKey *key = RedisModule_OpenKey(ctx, str, REDISMODULE_WRITE);
+    if (RedisModule_KeyType(key) == REDISMODULE_KEYTYPE_EMPTY) return;
+    RedisModule_SetExpire(key, ttl * 1000);
+}
+
+RedisModuleString* RedisModule_GetRecordProperty(RedisModuleCtx *ctx, ParsedToken parsed, RedisModuleString* property) {
+    RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:payloads", parsed.sessionId);
+    RedisModuleKey *key = RedisModule_OpenKey(ctx, str, REDISMODULE_READ);
+    if (RedisModule_KeyType(key) != REDISMODULE_KEYTYPE_HASH) return NULL;
+    RedisModuleString *payloadData = NULL;
+    RedisModule_HashGet(key, REDISMODULE_HASH_NONE, property, &payloadData, NULL);
+    return payloadData;
+}
+
+long long RedisModule_ReadTTL(RedisModuleCtx *ctx, ParsedToken parsed) {
+    RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", parsed.sessionId);
+    RedisModuleKey* key = RedisModule_OpenKey(ctx, str, REDISMODULE_READ);
+    return RedisModule_GetExpire(key);
+}
+
+void RedisModule_SetHashPayload(RedisModuleCtx *ctx, ParsedToken parsed, RedisModuleString *name, RedisModuleString *value, long long ttl) {
+    RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:payloads", parsed.sessionId);
+    RedisModuleKey* key = RedisModule_OpenKey(ctx, str, REDISMODULE_WRITE);
+    RedisModule_HashSet(key, REDISMODULE_HASH_NONE, name, value, NULL);
+    if (ttl > 0) RedisModule_SetExpire(key, ttl);
+}
+
 int EndCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   if (argc != 3) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
@@ -112,17 +147,8 @@ int EndCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   char* error = RedisModule_CheckSignature(ctx, signKey, parsed);
   if (error) return RedisModule_ReplyWithError(ctx, error);
 
-  {
-      RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", parsed.sessionId);
-      RedisModuleKey *key = RedisModule_OpenKey(ctx, str, REDISMODULE_WRITE);
-      if (RedisModule_KeyType(key) != REDISMODULE_KEYTYPE_EMPTY) RedisModule_DeleteKey(key);
-  }
-
-  {
-      RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:payloads", parsed.sessionId);
-      RedisModuleKey *key = RedisModule_OpenKey(ctx, str, REDISMODULE_WRITE);
-      if (RedisModule_KeyType(key) != REDISMODULE_KEYTYPE_EMPTY) RedisModule_DeleteKey(key);
-  }
+  RedisModule_DeleteRecord(ctx, parsed, "signature");
+  RedisModule_DeleteRecord(ctx, parsed, "payloads");
 
   return RedisModule_ReplyWithSimpleString(ctx, "OK");
 }
@@ -145,17 +171,8 @@ int ExpireCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   char* error = RedisModule_CheckSignature(ctx, signKey, parsed);
   if (error) return RedisModule_ReplyWithError(ctx, error);
 
-  {
-    RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", parsed.sessionId);
-    RedisModuleKey* key = RedisModule_OpenKey(ctx, str, REDISMODULE_WRITE);
-    if (RedisModule_KeyType(key) == REDISMODULE_KEYTYPE_STRING) RedisModule_SetExpire(key, ttl * 1000);
-  }
-
-  {
-    RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:payloads", parsed.sessionId);
-    RedisModuleKey* key = RedisModule_OpenKey(ctx, str, REDISMODULE_WRITE);
-    if (RedisModule_KeyType(key) == REDISMODULE_KEYTYPE_HASH) RedisModule_SetExpire(key, ttl * 1000);
-  }
+  RedisModule_SetRecordTTL(ctx, parsed, "signature", ttl);
+  RedisModule_SetRecordTTL(ctx, parsed, "payloads", ttl);
 
   return RedisModule_ReplyWithSimpleString(ctx, "OK");
 }
@@ -210,34 +227,8 @@ int PGetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   char* error = RedisModule_CheckSignature(ctx, signKey, parsed);
   if (error) return RedisModule_ReplyWithError(ctx, error);
 
-
-  // Get the payload.
-  RedisModuleString *sessionPayloadsKeyStr = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:payloads", parsed.sessionId);
-  RedisModuleKey *redisKey = RedisModule_OpenKey(ctx, sessionPayloadsKeyStr, REDISMODULE_READ);
-  if (RedisModule_KeyType(redisKey) != REDISMODULE_KEYTYPE_HASH) {
-    return RedisModule_ReplyWithError(ctx, "the requested <payload_name> does not exist");
-  }
-
-  RedisModuleString *payloadData = NULL;
-  RedisModule_HashGet(redisKey, REDISMODULE_HASH_NONE, argv[3], &payloadData, NULL);
-  if (payloadData == NULL) {
-    return RedisModule_ReplyWithError(ctx, "the requested <payload_name> does not exist");
-  }
-
-  return RedisModule_ReplyWithString(ctx, payloadData);
-}
-
-long long RedisModule_ReadTTL(RedisModuleCtx *ctx, ParsedToken parsed) {
-    RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", parsed.sessionId);
-    RedisModuleKey* key = RedisModule_OpenKey(ctx, str, REDISMODULE_READ);
-    return RedisModule_GetExpire(key);
-}
-
-void RedisModule_SetHashPayload(RedisModuleCtx *ctx, ParsedToken parsed, RedisModuleString *name, RedisModuleString *value, long long ttl) {
-    RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:payloads", parsed.sessionId);
-    RedisModuleKey* key = RedisModule_OpenKey(ctx, str, REDISMODULE_WRITE);
-    RedisModule_HashSet(key, REDISMODULE_HASH_NONE, name, value, NULL);
-    if (ttl > 0) RedisModule_SetExpire(key, ttl);
+  RedisModuleString *data = RedisModule_GetRecordProperty(ctx, parsed, argv[3]);
+  return RedisModule_ReplyWithString(ctx, data);
 }
 
 
