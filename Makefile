@@ -4,7 +4,7 @@ ifndef RM_INCLUDE_DIR
 endif
 
 ifndef RMUTIL_LIBDIR
-	RMUTIL_LIBDIR=../rmutil
+	RMUTIL_LIBDIR=./rmutil
 endif
 
 # find the OS
