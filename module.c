@@ -9,7 +9,6 @@
 #define PAYLOAD_DATA_MAX_STRLEN (size_t)1e6 * 8 // 8 MB.
 
 #include <string.h>
-
 #include "sodium.h"
 #include "redismodule.h"
 
@@ -38,6 +37,14 @@ size_t ZSessionGate_Length(RedisModuleString* value) {
   return length;
 }
 
+const char* ZSessionGate_ValidateLength(RedisModuleString* value, size_t min, const char* err_min, size_t max, const char* err_max) {
+  size_t length = -1;
+  RedisModule_StringPtrLen(value, &length);
+  if (length < min) return err_min;
+  if (length > max) return err_max;
+  return NULL;
+}
+
 char* ZSessionGate_CString(RedisModuleString* value) {
   size_t length;
   const char* buffer = RedisModule_StringPtrLen(value, &length);
@@ -49,8 +56,8 @@ char* ZSessionGate_CString(RedisModuleString* value) {
 
 long long ZSessionGate_UNumber(RedisModuleString* value) {
   long long ttl;
-  int code = RedisModule_StringToLongLong(value, &ttl);
-  if (code == REDISMODULE_OK) return ttl;
+  if (RedisModule_StringToLongLong(value, &ttl) == REDISMODULE_OK)
+    return ttl;
   return -1;
 }
 
@@ -71,8 +78,9 @@ void signData(const char *key, const char *data, char *signature) {
   sodium_bin2hex(signature, SIGNATURE_STRLEN + 1, signatureHash, 32); // 32 bytes = 256 bits.
 }
 
+ParsedToken parse(RedisModuleString* value) {
+  char* token = ZSessionGate_CString(value);
 
-ParsedToken parse(const char *token) {
   char* tokenVersion = RedisModule_Strdup(token);
   tokenVersion[TOKEN_VERSION_STRLEN] = '\0';
   char* sessionId = tokenVersion + TOKEN_VERSION_STRLEN + 1;
@@ -140,15 +148,16 @@ void ZSessionGate_SetHashPayload(RedisModuleCtx *ctx, ParsedToken parsed, RedisM
 int EndCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   if (argc != 3) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
+  const char* error = NULL;
 
-  if (ZSessionGate_Length(argv[1]) == 0) 
-    return RedisModule_ReplyWithError(ctx, ERROR_INPUT_1);
-  if (ZSessionGate_Length(argv[2]) != TOKEN_STRLEN)
-    return RedisModule_ReplyWithError(ctx, ERROR_INPUT_2);
+  if (ZSessionGate_Length(argv[1]) == 0) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_1);
 
-  ParsedToken parsed = parse(ZSessionGate_CString(argv[2]));
+  if (error == NULL) error = ZSessionGate_ValidateLength(argv[2], TOKEN_STRLEN , ERROR_INPUT_2, TOKEN_STRLEN, ERROR_INPUT_2);
+  if (error) return RedisModule_ReplyWithError(ctx, error);
 
-  char* error = ZSessionGate_CheckSignature(ctx, ZSessionGate_CString(argv[1]), parsed);
+  ParsedToken parsed = parse(argv[2]);
+
+  error = ZSessionGate_CheckSignature(ctx, ZSessionGate_CString(argv[1]), parsed);
   if (error) return RedisModule_ReplyWithError(ctx, error);
 
   ZSessionGate_DeleteRecord(ctx, parsed, "signature");
@@ -161,18 +170,20 @@ int EndCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 int ExpireCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   if (argc != 4) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
+  const char* error = NULL;
 
   if (ZSessionGate_Length(argv[1]) == 0) 
     return RedisModule_ReplyWithError(ctx, ERROR_INPUT_1);
-  if (ZSessionGate_Length(argv[2]) != TOKEN_STRLEN)
-    return RedisModule_ReplyWithError(ctx, ERROR_INPUT_2);
+
+  if (error == NULL) error = ZSessionGate_ValidateLength(argv[2], TOKEN_STRLEN , ERROR_INPUT_2, TOKEN_STRLEN, ERROR_INPUT_2);
+  if (error) return RedisModule_ReplyWithError(ctx, error);
 
   long long ttl = ZSessionGate_UNumber(argv[3]);
   if (ttl < 0) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_7);
 
-  ParsedToken parsed = parse(ZSessionGate_CString(argv[2]));
+  ParsedToken parsed = parse(argv[2]);
 
-  char* error = ZSessionGate_CheckSignature(ctx,  ZSessionGate_CString(argv[1]), parsed);
+  error = ZSessionGate_CheckSignature(ctx,  ZSessionGate_CString(argv[1]), parsed);
   if (error) return RedisModule_ReplyWithError(ctx, error);
 
   ZSessionGate_SetRecordTTL(ctx, parsed, "signature", ttl);
@@ -185,19 +196,19 @@ int ExpireCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 int PDelCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   if (argc != 4) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
+  const char* error = NULL;
 
-  if (ZSessionGate_Length(argv[1]) == 0) 
+  if (ZSessionGate_Length(argv[1]) == 0)
     return RedisModule_ReplyWithError(ctx, ERROR_INPUT_1);
-  if (ZSessionGate_Length(argv[2]) != TOKEN_STRLEN)
-    return RedisModule_ReplyWithError(ctx, ERROR_INPUT_2);
+    
+  if (error == NULL) error = ZSessionGate_ValidateLength(argv[2], TOKEN_STRLEN , ERROR_INPUT_2, TOKEN_STRLEN, ERROR_INPUT_2);
+  if (error == NULL) error = ZSessionGate_ValidateLength(argv[3],  1 , ERROR_INPUT_3, PAYLOAD_NAME_MAX_STRLEN, ERROR_INPUT_5);
 
-  char *name = ZSessionGate_CString(argv[3]);
-  if (strlen(name) == 0)                      return RedisModule_ReplyWithError(ctx, ERROR_INPUT_3);
-  if (strlen(name) > PAYLOAD_NAME_MAX_STRLEN) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_5);
+  if (error) return RedisModule_ReplyWithError(ctx, error);
   
-  ParsedToken parsed = parse(ZSessionGate_CString(argv[2]));
+  ParsedToken parsed = parse(argv[2]);
+  error = ZSessionGate_CheckSignature(ctx, ZSessionGate_CString(argv[1]), parsed);
 
-  char* error = ZSessionGate_CheckSignature(ctx, ZSessionGate_CString(argv[1]), parsed);
   if (error) return RedisModule_ReplyWithError(ctx, error);
 
   // Delete the payload.
@@ -216,19 +227,18 @@ int PDelCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 int PGetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   if (argc != 4) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
+  const char* error = NULL;
 
-  if (ZSessionGate_Length(argv[1]) == 0) 
-    return RedisModule_ReplyWithError(ctx, ERROR_INPUT_1);
-  if (ZSessionGate_Length(argv[2]) != TOKEN_STRLEN)
-    return RedisModule_ReplyWithError(ctx, ERROR_INPUT_2);
+  if (ZSessionGate_Length(argv[1]) == 0) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_1);
+    
+  if (error == NULL) error = ZSessionGate_ValidateLength(argv[2], TOKEN_STRLEN , ERROR_INPUT_2, TOKEN_STRLEN, ERROR_INPUT_2);
+  if (error == NULL) error = ZSessionGate_ValidateLength(argv[3],  1 , ERROR_INPUT_3, PAYLOAD_NAME_MAX_STRLEN, ERROR_INPUT_5);
 
-  char *name = ZSessionGate_CString(argv[3]);
-  if (strlen(name) == 0)                      return RedisModule_ReplyWithError(ctx, ERROR_INPUT_3);
-  if (strlen(name) > PAYLOAD_NAME_MAX_STRLEN) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_5);
+  if (error) return RedisModule_ReplyWithError(ctx, error);
 
-  ParsedToken parsed = parse(ZSessionGate_CString(argv[2]));
+  ParsedToken parsed = parse(argv[2]);
 
-  char* error = ZSessionGate_CheckSignature(ctx, ZSessionGate_CString(argv[1]), parsed);
+  error = ZSessionGate_CheckSignature(ctx, ZSessionGate_CString(argv[1]), parsed);
   if (error) return RedisModule_ReplyWithError(ctx, error);
 
   RedisModuleString *data = ZSessionGate_GetRecordProperty(ctx, parsed, argv[3]);
@@ -239,27 +249,22 @@ int PGetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 int PSetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   if (argc != 5) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
+  const char* error = NULL;
 
-  if (ZSessionGate_Length(argv[1]) == 0) 
-    return RedisModule_ReplyWithError(ctx, ERROR_INPUT_1);
-  if (ZSessionGate_Length(argv[2]) != TOKEN_STRLEN)
-    return RedisModule_ReplyWithError(ctx, ERROR_INPUT_2);
+  if (ZSessionGate_Length(argv[1]) == 0) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_1);
 
-  char *name = ZSessionGate_CString(argv[3]);
-  char *data = ZSessionGate_CString(argv[4]);
+  if (error == NULL) error = ZSessionGate_ValidateLength(argv[2], TOKEN_STRLEN , ERROR_INPUT_2, TOKEN_STRLEN, ERROR_INPUT_2);
+  if (error == NULL) error = ZSessionGate_ValidateLength(argv[3], 1 , ERROR_INPUT_3, PAYLOAD_NAME_MAX_STRLEN, ERROR_INPUT_5);
+  if (error == NULL) error = ZSessionGate_ValidateLength(argv[4], 1 , ERROR_INPUT_4, PAYLOAD_DATA_MAX_STRLEN, ERROR_INPUT_6);
 
-  if (strlen(name) == 0)                      return RedisModule_ReplyWithError(ctx, ERROR_INPUT_3);
-  if (strlen(data) == 0)                      return RedisModule_ReplyWithError(ctx, ERROR_INPUT_4);
-  if (strlen(name) > PAYLOAD_NAME_MAX_STRLEN) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_5);
-  if (strlen(data) > PAYLOAD_DATA_MAX_STRLEN) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_6);
-
-  ParsedToken parsed = parse(ZSessionGate_CString(argv[2]));
-
-  char* error = ZSessionGate_CheckSignature(ctx, ZSessionGate_CString(argv[1]), parsed);
   if (error) return RedisModule_ReplyWithError(ctx, error);
 
-  ZSessionGate_SetHashPayload(ctx, parsed, argv[3], argv[4], 
-    ZSessionGate_ReadTTL(ctx, parsed));
+  ParsedToken parsed = parse(argv[2]);
+
+  error = ZSessionGate_CheckSignature(ctx, ZSessionGate_CString(argv[1]), parsed);
+  if (error) return RedisModule_ReplyWithError(ctx, error);
+
+  ZSessionGate_SetHashPayload(ctx, parsed, argv[3], argv[4], ZSessionGate_ReadTTL(ctx, parsed));
 
   return RedisModule_ReplyWithSimpleString(ctx, "OK");
 }
@@ -268,12 +273,12 @@ int PSetCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 int StartCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
   if (argc != 3) return RedisModule_WrongArity(ctx);
   RedisModule_AutoMemory(ctx);
+  //const char* error = NULL;
 
-  char *signKey = ZSessionGate_CString(argv[1]);
+  if (ZSessionGate_Length(argv[1]) == 0) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_1);
+
   long long ttl = ZSessionGate_UNumber(argv[2]);
-
-  if (strlen(signKey) == 0) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_1);
-  if (ttl < 0)              return RedisModule_ReplyWithError(ctx, ERROR_INPUT_7);
+  if (ttl < 0) return RedisModule_ReplyWithError(ctx, ERROR_INPUT_7);
 
   char sessionId[SESSION_ID_STRLEN + 1];
   char signature[SIGNATURE_STRLEN + 1];
@@ -286,7 +291,7 @@ int StartCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     if (RedisModule_KeyType(key) == REDISMODULE_KEYTYPE_EMPTY) break;
   }
 
-  signData(signKey, sessionId, signature);
+  signData(ZSessionGate_CString(argv[1]), sessionId, signature);
 
   {
       RedisModuleString *str = RedisModule_CreateStringPrintf(ctx, "sg-session:%s:signature", sessionId);
